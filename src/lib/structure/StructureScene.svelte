@@ -126,6 +126,14 @@
     radius: number
   }
 
+  type DirectAtomDragState = {
+    site_indices: number[]
+    last_point: Vec3
+    pointer_id: number
+    moved: boolean
+    orbit_was_enabled: boolean
+  }
+
   type BondContextMenu = {
     site_idx_1: number
     site_idx_2: number
@@ -139,6 +147,8 @@
     object?: Object3D
     point?: Vector3
   }
+  type InstanceEvent = { instanceId?: number }
+  type AtomPointerEvent = ThrelteEvent<PointerEvent> & InstanceEvent
   type BondPointerEvent = ThrelteEvent<PointerEvent>
   type BondContextMenuEvent = ThrelteEvent<MouseEvent>
 
@@ -253,6 +263,7 @@
     add_element = $bindable(`C`),
     cursor = $bindable(`default`),
     dragging_atoms = $bindable(false),
+    direct_atom_drag = false,
     volumetric_data = undefined,
     isosurface_settings = DEFAULT_ISOSURFACE_SETTINGS,
     active_volume_idx = 0,
@@ -387,6 +398,7 @@
     add_element?: ElementSymbol // element to add when clicking in add-atom mode
     cursor?: string // cursor style for the 3D canvas
     dragging_atoms?: boolean // true while TransformControls drag is active (skips expensive recalculations)
+    direct_atom_drag?: boolean // drag selected atoms on a camera-facing plane without TransformControls
     // Loaded volumetric datasets for isosurface rendering
     volumetric_data?: VolumetricData[]
     isosurface_settings?: IsosurfaceSettings // Isosurface rendering settings
@@ -524,10 +536,15 @@
           onpointerleave: () => schedule_atom_hover_clear(site_idx),
         }
 
+  let direct_drag_state = $state<DirectAtomDragState | null>(null)
+  let suppress_direct_click_site_idx: number | null = null
+  let suppress_direct_click_until = 0
+
   // Cursor style for the canvas, derived from mode and hover state
   let canvas_cursor = $derived.by(() => {
     if (!interactive) return `default`
     if (measure_mode === `edit-atoms` && add_atom_mode) return `crosshair`
+    if (direct_drag_state) return `grabbing`
     if (measure_mode === `edit-bonds` && hovered_bond_key != null) {
       return bond_edits_enabled ? `pointer` : `not-allowed`
     }
@@ -539,6 +556,7 @@
       }
       if (measure_mode === `edit-atoms`) {
         if (is_image_site(structure?.sites?.[hovered_idx])) return `not-allowed`
+        if (direct_atom_drag) return `grab`
       }
       return `pointer`
     }
@@ -878,7 +896,86 @@
 
   // Selection handlers shared by instanced atom meshes and per-site hit targets
   // so the edit-bonds click semantics can't drift between the two paths
-  const handle_atom_pointerdown = (site_idx: number, event: PointerEvent) => {
+  function structure_point_from_event(event: AtomPointerEvent): Vec3 | null {
+    const point = event.point?.clone()
+    if (!point) return null
+    const parent = event.object?.parent
+    if (parent) {
+      parent.updateWorldMatrix(true, false)
+      parent.worldToLocal(point)
+    }
+    return [point.x, point.y, point.z]
+  }
+
+  function start_direct_atom_drag(site_idx: number, event: AtomPointerEvent): void {
+    const native_event = event.nativeEvent ?? event
+    if (native_event.button !== 0 || is_image_site(structure?.sites?.[site_idx])) return
+    const start_point = structure_point_from_event(event)
+    if (!start_point) return
+
+    const already_selected = selected_sites.includes(site_idx)
+    const next_sites = native_event.shiftKey
+      ? already_selected
+        ? selected_sites.filter((idx) => idx !== site_idx)
+        : [...selected_sites, site_idx]
+      : already_selected
+        ? [...selected_sites]
+        : [site_idx]
+    selected_sites = next_sites
+    measured_sites = [...next_sites]
+    suppress_direct_click_site_idx = site_idx
+    suppress_direct_click_until = performance.now() + 500
+    if (next_sites.length === 0) return
+
+    const orbit_was_enabled = orbit_controls?.enabled ?? true
+    if (orbit_controls) orbit_controls.enabled = false
+    dragging_atoms = true
+    direct_drag_state = {
+      site_indices: [...next_sites],
+      last_point: start_point,
+      pointer_id: native_event.pointerId,
+      moved: false,
+      orbit_was_enabled,
+    }
+    native_event.preventDefault()
+    event.stopPropagation()
+  }
+
+  function move_direct_atoms(event: AtomPointerEvent): void {
+    const drag = direct_drag_state
+    const native_event = event.nativeEvent ?? event
+    if (!drag || native_event.pointerId !== drag.pointer_id) return
+    const next_point = structure_point_from_event(event)
+    if (!next_point) return
+    const delta: Vec3 = [
+      next_point[0] - drag.last_point[0],
+      next_point[1] - drag.last_point[1],
+      next_point[2] - drag.last_point[2],
+    ]
+    if (delta[0] ** 2 + delta[1] ** 2 + delta[2] ** 2 < 1e-10) return
+    if (!drag.moved) {
+      drag.moved = true
+      on_operation_start?.()
+    }
+    drag.last_point = next_point
+    on_sites_moved?.(drag.site_indices, delta)
+    native_event.preventDefault()
+    event.stopPropagation()
+  }
+
+  function finish_direct_atom_drag(event: PointerEvent): void {
+    const drag = direct_drag_state
+    if (!drag || event.pointerId !== drag.pointer_id) return
+    if (orbit_controls) orbit_controls.enabled = drag.orbit_was_enabled
+    dragging_atoms = false
+    direct_drag_state = null
+  }
+
+  const handle_atom_pointerdown = (site_idx: number, event: AtomPointerEvent) => {
+    if (measure_mode === `edit-atoms` && direct_atom_drag && !add_atom_mode) {
+      start_direct_atom_drag(site_idx, event)
+      return
+    }
     if (measure_mode !== `edit-bonds` || bond_edit_mode !== `add`) return
     select_edit_bonds_site(site_idx, event)
   }
@@ -889,6 +986,16 @@
     // wipes the hover. Threlte wraps the DOM event, so pointerType lives on nativeEvent.
     const native_event = (event as BondContextMenuEvent).nativeEvent ?? event
     if ((native_event as PointerEvent).pointerType === `touch`) set_atom_hover(site_idx)
+    if (
+      measure_mode === `edit-atoms` &&
+      direct_atom_drag &&
+      suppress_direct_click_site_idx === site_idx &&
+      performance.now() <= suppress_direct_click_until
+    ) {
+      suppress_direct_click_site_idx = null
+      event.stopPropagation()
+      return
+    }
     if (measure_mode === `edit-bonds`) {
       if (bond_edit_mode !== `add`) return
       if (skip_duplicate_edit_bonds_click(site_idx)) {
@@ -903,7 +1010,6 @@
   // hit `instanceId`, which indexes into the mesh's `atoms` array. One handler
   // set per mesh instead of one per atom. Inactive grid panes render without
   // raycast handlers; ghosted edit-mode image atoms are non-interactive.
-  type InstanceEvent = { instanceId?: number }
   const atom_instance_events = (
     instance_atoms: { site_idx: number }[],
     is_edit_image: boolean,
@@ -919,7 +1025,7 @@
       onpointerenter: wrap(set_atom_hover),
       onpointermove: wrap(set_atom_hover),
       onpointerleave: wrap(schedule_atom_hover_clear),
-      onpointerdown: wrap<PointerEvent & InstanceEvent>(handle_atom_pointerdown),
+      onpointerdown: wrap<AtomPointerEvent>(handle_atom_pointerdown),
       onclick: wrap<MouseEvent & InstanceEvent>(handle_atom_click),
     }
   }
@@ -931,7 +1037,7 @@
       ? {}
       : {
           ...atom_hover_props(site_idx),
-          onpointerdown: (event: PointerEvent) => handle_atom_pointerdown(site_idx, event),
+          onpointerdown: (event: AtomPointerEvent) => handle_atom_pointerdown(site_idx, event),
           onclick: (event: MouseEvent) => handle_atom_click(site_idx, event),
         }
 
@@ -1908,6 +2014,8 @@
   })
 </script>
 
+<svelte:window onpointerup={finish_direct_atom_drag} onpointercancel={finish_direct_atom_drag} />
+
 {#snippet site_label_snippet(site_idx: number)}
   {@const site = structure?.sites[site_idx]}
   {#if site}
@@ -2327,7 +2435,7 @@
       {/if}
 
       <!-- TransformControls for editing atoms in edit-atoms mode -->
-      {#if interactive && measure_mode === `edit-atoms` && selected_sites.length > 0 && structure?.sites}
+      {#if interactive && measure_mode === `edit-atoms` && !direct_atom_drag && selected_sites.length > 0 && structure?.sites}
         {@const selected_atoms = selected_sites
           .map((idx) => structure?.sites?.[idx])
           .filter((site): site is Site => site != null)}
@@ -2374,6 +2482,22 @@
             }}
           />
         {/if}
+      {/if}
+
+      <!-- Camera-facing drag plane used after pressing an atom in direct edit mode. -->
+      {#if interactive && measure_mode === `edit-atoms` && direct_drag_state}
+        <T.Mesh
+          position={direct_drag_state.last_point}
+          onBeforeRender={(mesh: Mesh) => {
+            if (camera) mesh.lookAt(camera.position)
+          }}
+          onpointermove={move_direct_atoms}
+        >
+          <T.PlaneGeometry
+            args={[Math.max(200, structure_size * 4), Math.max(200, structure_size * 4)]}
+          />
+          <T.MeshBasicMaterial transparent opacity={0} side={2} depthWrite={false} />
+        </T.Mesh>
       {/if}
 
       <!-- Invisible plane for click-to-place atom in add-atom mode -->

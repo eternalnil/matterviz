@@ -559,10 +559,8 @@
         on_operation_start={session.push_undo}
         on_bond_edit_start={session.push_bond_undo}
         on_add_atom={session.add_atom}
-        bind:add_atom_mode={
-          () => session.add_atom_mode, (value) => (session.add_atom_mode = value)
-        }
-        bind:add_element={() => session.add_element, (value) => (session.add_element = value)}
+        add_atom_mode={scene_props.add_atom_mode ?? session.add_atom_mode}
+        add_element={scene_props.add_element ?? session.add_element}
         bind:cursor
         bind:dragging_atoms={
           () => session.dragging_atoms, (value) => (session.dragging_atoms = value)
