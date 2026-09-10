@@ -1,6 +1,6 @@
 {
-  "name": "matterviz",
-  "version": "0.7.0",
+  "name": "@eternalnil/matterviz",
+  "version": "0.7.0-evocat.1",
   "description": "Interactive visualizations for materials science: periodic tables, 3D structures, MD trajectories, heatmaps, scatter plots.",
   "keywords": [
     "chemistry",
@@ -10,11 +10,11 @@
     "plotting",
     "svelte"
   ],
-  "homepage": "https://janosh.github.io/matterviz",
-  "bugs": "https://github.com/janosh/matterviz/issues",
+  "homepage": "https://github.com/eternalnil/matterviz",
+  "bugs": "https://github.com/eternalnil/matterviz/issues",
   "license": "MIT",
   "author": "Janosh Riebesell <janosh.riebesell@gmail.com>",
-  "repository": "https://github.com/janosh/matterviz",
+  "repository": "https://github.com/eternalnil/matterviz",
   "files": [
     "dist"
   ],
